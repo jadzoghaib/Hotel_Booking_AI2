@@ -85,7 +85,7 @@ The original notebooks described a majority-voting ensemble but never implemente
 | SVM | Linear kernel, C=0.5; uses scaled features; `probability=True` for AUC |
 | Ensemble (Soft Vote) | Combines LR + RF + XGBoost + LightGBM via soft (probability-weighted) voting |
 
-All models were trained and evaluated on the **global dataset**. The train/test split was stratified by `is_canceled` to maintain class balance.
+All models were trained and evaluated on a **30% stratified random sample** (~35,800 rows) of the full dataset, sampled immediately after loading to preserve class balance. This reduces runtime from ~2 hours to ~20 minutes with no meaningful loss in statistical validity. The train/test split was stratified by `is_canceled` to maintain class balance.
 
 ---
 
