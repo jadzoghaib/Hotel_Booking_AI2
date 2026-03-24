@@ -27,7 +27,7 @@ st.set_page_config(
 # ── Load model ────────────────────────────────────────────────────────────────
 @st.cache_resource
 def load_model():
-    return joblib.load("best_model.pkl")
+    return joblib.load("best_model_compressed.pkl")
 
 model = load_model()
 EXPECTED_FEATURES = model.feature_names_in_.tolist()
