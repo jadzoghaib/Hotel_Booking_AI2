@@ -14,7 +14,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import streamlit as st
 
-from preprocessing import preprocess_booking, preprocess_batch, TOP_COUNTRIES, MONTH_MAP
+from preprocessing import preprocess_booking, TOP_COUNTRIES
 from stochastic_model import simulate_arrivals
 
 # ── Page config ───────────────────────────────────────────────────────────────
@@ -32,6 +32,17 @@ def load_model():
 model = load_model()
 EXPECTED_FEATURES = model.feature_names_in_.tolist()
 
+# ── Constants ─────────────────────────────────────────────────────────────────
+HOTEL_CAPACITY = {"City Hotel": 225, "Resort Hotel": 190}
+
+ROOM_TYPES = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'L']
+
+# Room capacities — uniform descending, sums match hotel capacity
+ROOM_TYPE_DEFAULTS = {
+    "City Hotel":   {'A': 60, 'B': 50, 'C': 40, 'D': 30, 'E': 20, 'F': 10, 'G': 8, 'H': 4, 'L': 3},
+    "Resort Hotel": {'A': 50, 'B': 42, 'C': 34, 'D': 26, 'E': 18, 'F': 10, 'G': 6, 'H': 3, 'L': 1},
+}
+
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 st.sidebar.title("🏨 Hotel Setup")
 
@@ -40,59 +51,44 @@ hotel_type = st.sidebar.selectbox(
     options=["City Hotel", "Resort Hotel"],
 )
 
-HOTEL_CAPACITY = {"City Hotel": 225, "Resort Hotel": 190}
-
-capacity = st.sidebar.number_input(
-    "Hotel Capacity (rooms)",
-    min_value=1, max_value=2000,
-    value=HOTEL_CAPACITY[hotel_type],
-    step=1,
-)
+capacity = HOTEL_CAPACITY[hotel_type]
+st.sidebar.metric("Hotel Capacity (rooms)", capacity)
 
 overbook_buffer = st.sidebar.slider(
     "Max Overbook Buffer",
     min_value=0, max_value=50, value=10, step=1,
     format="%d%%",
     help=(
-        "How far above capacity you are willing to push expected arrivals. "
-        "0% = never exceed capacity. 10% = accept bookings until expected arrivals reach 110% of capacity."
+        "How far above a room type's effective capacity you are willing to push expected arrivals. "
+        "0% = never exceed capacity. 10% = accept until expected arrivals reach 110% of effective capacity."
     ),
 ) / 100.0
 
-max_expected_arrivals = capacity * (1 + overbook_buffer)
-st.sidebar.caption(
-    f"Target: fill to **{capacity}** rooms (100% occupancy).  \n"
-    f"Hard cap: expected arrivals ≤ **{max_expected_arrivals:.0f}** "
-    f"({100 + overbook_buffer*100:.0f}% of capacity)."
-)
+# ── Per-room-type capacities (fixed, from dataset proportions) ────────────────
+room_capacity = ROOM_TYPE_DEFAULTS[hotel_type]
+
+st.sidebar.markdown("---")
+with st.sidebar.expander("Room Type Capacities"):
+    st.caption("Based on dataset proportions.")
+    for rt in ROOM_TYPES:
+        st.markdown(f"**Type {rt}:** {room_capacity[rt]} rooms")
+
 
 # ── Auto-load existing bookings at full capacity ──────────────────────────────
-@st.cache_data
-def load_full_capacity_bookings(hotel: str, n_rooms: int, seed: int = 42):
-    """
-    Sample exactly n_rooms bookings from the dataset for the given hotel,
-    stratified 50/50 between is_canceled=0 and is_canceled=1.
-    Returns the raw DataFrame (leakage cols still present — preprocess_batch drops them).
-    """
-    df = pd.read_csv("hotel_bookings.csv").dropna(subset=["children"])
-    df = df[df["hotel"] == hotel]
+# ── Synthetic full house: each room type filled to its capacity, p_cancel = 0.30 ──
+SYNTHETIC_CANCEL_PROB = 0.30
 
-    n_cancel = n_rooms // 2
-    n_show   = n_rooms - n_cancel
+existing_bookings_rt = []
+for rt in ROOM_TYPES:
+    existing_bookings_rt.extend([rt] * room_capacity[rt])
 
-    cancelled = df[df["is_canceled"] == 1].sample(n=n_cancel, random_state=seed)
-    showed_up = df[df["is_canceled"] == 0].sample(n=n_show,   random_state=seed)
-
-    return pd.concat([cancelled, showed_up]).sample(frac=1, random_state=seed)
-
-existing_bookings = load_full_capacity_bookings(hotel_type, int(capacity))
-X_existing        = preprocess_batch(existing_bookings, EXPECTED_FEATURES)
-existing_probs    = model.predict_proba(X_existing)[:, 1].tolist()
+existing_bookings = pd.DataFrame({'reserved_room_type': existing_bookings_rt})
+existing_probs    = [SYNTHETIC_CANCEL_PROB] * len(existing_bookings)
 
 st.sidebar.markdown("---")
 st.sidebar.success(
-    f"Hotel loaded at full capacity: **{len(existing_probs)} bookings** "
-    f"(50% cancelled / 50% arrived)"
+    f"Hotel at full capacity: **{len(existing_probs)} bookings** "
+    f"({int(SYNTHETIC_CANCEL_PROB*100)}% p_cancel per booking)"
 )
 
 # ── Baseline occupancy display ────────────────────────────────────────────────
@@ -103,7 +99,7 @@ col1.metric("Current Bookings", len(existing_probs))
 expected_now = sum(1 - p for p in existing_probs)
 col2.metric("Expected Arrivals", f"{expected_now:.1f}")
 col3.metric("Expected Occupancy", f"{expected_now / capacity * 100:.1f}%")
-col4.metric("Overbook Cap", f"{max_expected_arrivals:.0f} rooms ({100 + overbook_buffer*100:.0f}%)")
+col4.metric("Overbook Buffer", f"{overbook_buffer*100:.0f}%")
 
 st.markdown("---")
 
@@ -156,7 +152,7 @@ with st.form("booking_form"):
         stays_weekend = st.number_input("Weekend Nights", min_value=0, max_value=20, value=1)
         reserved_room = st.selectbox(
             "Reserved Room Type",
-            options=["A", "B", "C", "D", "E", "F", "G", "H", "L", "P"],
+            options=ROOM_TYPES,
         )
     with c5:
         agent = st.number_input("Agent ID (0 = no agent)", min_value=0, value=0)
@@ -207,66 +203,84 @@ if submitted:
     X_new        = preprocess_booking(booking, EXPECTED_FEATURES)
     p_cancel_new = float(model.predict_proba(X_new)[0, 1])
 
-    # Expected arrivals before and after
-    expected_before = sum(1 - p for p in existing_probs)
-    expected_after  = expected_before + (1 - p_cancel_new)
+    # ── Room-type level analysis ───────────────────────────────────────────
+    # Filter existing bookings competing for the same room type
+    room_mask        = existing_bookings['reserved_room_type'].values == reserved_room
+    competing_probs  = [p for p, m in zip(existing_probs, room_mask) if m]
+    n_competing      = len(competing_probs)
 
-    # Decision: ACCEPT if expected arrivals stay within the overbook cap
-    accept = expected_after <= max_expected_arrivals
+    # Upgrade buffer = total capacity of all room types higher than the reserved type
+    rt_idx        = ROOM_TYPES.index(reserved_room)
+    upgrade_buffer = sum(room_capacity[rt] for rt in ROOM_TYPES[rt_idx + 1:])
 
-    # Monte Carlo simulation (for the histogram — context only)
-    probs_with_new  = existing_probs + [p_cancel_new]
-    arrivals_after  = simulate_arrivals(probs_with_new, n_simulations=10_000, seed=42)
-    p_overbook      = float((arrivals_after > capacity).mean())
+    # Effective capacity = this room type's capacity + upgrade buffer
+    effective_cap    = room_capacity[reserved_room] + upgrade_buffer
+    max_expected     = effective_cap * (1 + overbook_buffer)
+
+    # Expected arrivals for this room type
+    expected_competing_before = sum(1 - p for p in competing_probs)
+    expected_competing_after  = expected_competing_before + (1 - p_cancel_new)
+
+    # Decision
+    accept = expected_competing_after <= max_expected
+
+    # Monte Carlo on the competing room type only
+    probs_with_new = competing_probs + [p_cancel_new]
+    arrivals_after = simulate_arrivals(probs_with_new, n_simulations=10_000, seed=42)
+    p_overbook     = float((arrivals_after > effective_cap).mean())
 
     # ── Output layout ─────────────────────────────────────────────────────
     st.markdown("---")
-    st.subheader("Decision")
+    st.subheader(f"Decision — Room Type {reserved_room}")
+
+    # Will this person cancel?
+    will_cancel = p_cancel_new >= 0.5
+    if will_cancel:
+        st.warning(f"⚠️  This guest is **likely to cancel** (cancellation probability: {p_cancel_new*100:.1f}%)")
+    else:
+        st.info(f"✅  This guest is **likely to show up** (cancellation probability: {p_cancel_new*100:.1f}%)")
 
     if accept:
         st.success(
-            f"✅  ACCEPT  —  Expected arrivals ({expected_after:.1f}) "
-            f"stay within your overbook cap ({max_expected_arrivals:.0f} rooms, "
-            f"{100 + overbook_buffer*100:.0f}% of capacity)."
+            f"✅  ACCEPT  —  Expected Type {reserved_room} arrivals ({expected_competing_after:.1f}) "
+            f"stay within effective capacity ({effective_cap} rooms + {overbook_buffer*100:.0f}% buffer = {max_expected:.0f})."
         )
     else:
         st.error(
-            f"❌  REJECT  —  Expected arrivals ({expected_after:.1f}) "
-            f"would exceed your overbook cap ({max_expected_arrivals:.0f} rooms, "
-            f"{100 + overbook_buffer*100:.0f}% of capacity)."
+            f"❌  REJECT  —  Expected Type {reserved_room} arrivals ({expected_competing_after:.1f}) "
+            f"would exceed effective capacity ({effective_cap} rooms + {overbook_buffer*100:.0f}% buffer = {max_expected:.0f})."
         )
 
     # Metrics row
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Cancellation Probability (new booking)", f"{p_cancel_new*100:.1f}%")
-    m2.metric("Expected Arrivals — Before", f"{expected_before:.1f}")
-    m3.metric("Expected Arrivals — After",  f"{expected_after:.1f}",
-              delta=f"{expected_after - expected_before:+.2f}",
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Cancellation Probability", f"{p_cancel_new*100:.1f}%")
+    m2.metric(f"Type {reserved_room} Bookings", n_competing)
+    m3.metric("Expected Arrivals — Before", f"{expected_competing_before:.1f}")
+    m4.metric("Expected Arrivals — After",  f"{expected_competing_after:.1f}",
+              delta=f"{expected_competing_after - expected_competing_before:+.2f}",
               delta_color="inverse")
-    m4.metric("Expected Occupancy — After", f"{expected_after / capacity * 100:.1f}%")
+    m5.metric("Effective Capacity", f"{effective_cap} ({room_capacity[reserved_room]} + {upgrade_buffer})")
 
     # Arrival distribution histogram
-    st.markdown("#### Simulated Arrival Distribution (with new booking)")
+    st.markdown(f"#### Simulated Arrival Distribution — Room Type {reserved_room} (with new booking)")
     fig, ax = plt.subplots(figsize=(10, 4))
     ax.hist(arrivals_after, bins=40, color="steelblue", edgecolor="white", alpha=0.85)
-    ax.axvline(capacity, color="red", linewidth=2, linestyle="--",
-               label=f"Capacity ({capacity})")
-    ax.axvline(max_expected_arrivals, color="orange", linewidth=2, linestyle="--",
-               label=f"Overbook cap ({max_expected_arrivals:.0f})")
+    ax.axvline(room_capacity[reserved_room], color="red", linewidth=2, linestyle="--",
+               label=f"Type {reserved_room} capacity ({room_capacity[reserved_room]})")
+    ax.axvline(effective_cap, color="orange", linewidth=2, linestyle="--",
+               label=f"Effective capacity with upgrades ({effective_cap})")
     ax.axvline(arrivals_after.mean(), color="green", linewidth=1.5, linestyle=":",
                label=f"Mean arrivals ({arrivals_after.mean():.1f})")
-    ax.axvspan(capacity + 1, arrivals_after.max() + 1, alpha=0.1, color="red")
-    ax.set_xlabel("Number of Guests Arriving")
+    ax.axvspan(room_capacity[reserved_room] + 1, arrivals_after.max() + 1, alpha=0.1, color="red")
+    ax.set_xlabel("Number of Guests Arriving (Room Type " + reserved_room + ")")
     ax.set_ylabel("Frequency (out of 10,000 simulations)")
-    ax.set_title("Monte Carlo: Simulated Arrival Distribution (with new booking)")
+    ax.set_title(f"Monte Carlo: Simulated Arrivals for Room Type {reserved_room}")
     ax.legend()
     st.pyplot(fig)
     plt.close(fig)
 
     st.caption(
-        f"Red dashed line = hotel capacity ({capacity} rooms).  "
-        f"Orange dashed line = overbook cap ({max_expected_arrivals:.0f} rooms).  "
-        f"Shaded area = scenarios where guests exceed capacity.  "
-        f"P(arrivals > capacity) = {p_overbook*100:.1f}% (shown for reference only — "
-        f"decision is based on expected arrivals vs. cap)."
+        f"Red dashed = Type {reserved_room} base capacity ({room_capacity[reserved_room]}).  "
+        f"Orange dashed = effective capacity including {upgrade_buffer} upgrade rooms ({effective_cap}).  "
+        f"P(arrivals > base capacity) = {p_overbook*100:.1f}% (shown for reference)."
     )

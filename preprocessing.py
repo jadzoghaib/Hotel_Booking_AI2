@@ -40,8 +40,11 @@ MONTH_MAP = {
 
 NOMINAL_COLS = [
     'hotel', 'meal', 'country', 'market_segment', 'distribution_channel',
-    'reserved_room_type', 'deposit_type', 'customer_type',
+    'deposit_type', 'customer_type',
 ]
+
+# Ordinal encoding for room type (alphabetical = assumed quality order, P excluded)
+ROOM_TYPE_MAP = {'A': 1, 'B': 2, 'C': 3, 'D': 4, 'E': 5, 'F': 6, 'G': 7, 'H': 8, 'L': 9}
 
 
 def preprocess_booking(booking: dict, expected_features) -> pd.DataFrame:
@@ -105,10 +108,14 @@ def preprocess_booking(booking: dict, expected_features) -> pd.DataFrame:
     if isinstance(month_val, str):
         row['arrival_date_month'] = MONTH_MAP.get(month_val, 1)
 
-    # ── 4. Build single-row DataFrame ────────────────────────────────────
+    # ── 4. Ordinal-encode room type ───────────────────────────────────────
+    room_val = row.get('reserved_room_type', 'A')
+    row['reserved_room_type'] = ROOM_TYPE_MAP.get(room_val, 1)
+
+    # ── 5. Build single-row DataFrame ────────────────────────────────────
     df = pd.DataFrame([row])
 
-    # ── 5. One-hot encode nominal columns (drop_first=False, same as notebook) ──
+    # ── 6. One-hot encode nominal columns (drop_first=False, same as notebook) ──
     cols_to_encode = [c for c in NOMINAL_COLS if c in df.columns]
     df = pd.get_dummies(df, columns=cols_to_encode, drop_first=False)
 
@@ -155,6 +162,10 @@ def preprocess_batch(df_raw: pd.DataFrame, expected_features) -> pd.DataFrame:
     # Ordinal-encode month
     if 'arrival_date_month' in df.columns:
         df['arrival_date_month'] = df['arrival_date_month'].map(MONTH_MAP).fillna(1)
+
+    # Ordinal-encode room type
+    if 'reserved_room_type' in df.columns:
+        df['reserved_room_type'] = df['reserved_room_type'].map(ROOM_TYPE_MAP).fillna(1)
 
     # One-hot encode
     cols_to_encode = [c for c in NOMINAL_COLS if c in df.columns]
